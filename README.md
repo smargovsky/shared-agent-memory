@@ -173,6 +173,24 @@ EOF
 
 Every command takes `--json`. Exit codes: `0` ok, `2` usage, `3` API or config failure, `4` rejected by the secret filter (redact and retry). Memory text is capped at 8 KB (`MEMORY_MAX_TEXT_BYTES`) and titles at 120 characters. Plain `http://` is refused for anything but localhost unless `--insecure` is passed. When a write times out, the CLI says the outcome is unknown; search before storing again.
 
+### CLI hooks
+
+The CLI plugin (`plugins/agent-memory-cli/`) registers one hook. On `SessionStart` it runs `agent-memory hook session-start`, which adds short shared-memory guidance to Claude's context. After compaction (`source: "compact"`) it also adds a prompt to resume a task saved under the `recursive-task-state` tag. Hook output goes through `hookSpecificOutput.additionalContext`; `systemMessage` would only be shown to the user, and `PostCompact` hooks can't add context at all.
+
+A nudge every Nth prompt to review the conversation and store learnings is available but off by default. To turn it on, add this to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "agent-memory hook turn --interval 5", "timeout": 10 }] }
+    ]
+  }
+}
+```
+
+It counts prompts per session in `~/.local/state/agent-memory/turn-state/` (`$XDG_STATE_HOME` respected; counters older than a week are pruned). Hook commands always exit 0, so a problem never blocks a prompt; details go to stderr (Claude Code's debug log).
+
 ## Codex Setup
 
 Codex support ships as a native plugin manifest plus a repo-local marketplace:

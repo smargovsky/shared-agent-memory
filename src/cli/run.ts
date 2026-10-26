@@ -17,6 +17,14 @@ import {
   settingsPath,
 } from "./allowlist.js";
 import {
+  DEFAULT_TURN_INTERVAL,
+  HookOutput,
+  parseHookInput,
+  sessionStartOutput,
+  stateDir,
+  turnOutput,
+} from "./hooks.js";
+import {
   applyConfig,
   assertSecureUrl,
   ConfigError,
@@ -37,6 +45,8 @@ const MAX_TITLE_CHARS = 120;
 const MAX_LOAD_IDS = 50;
 const MAX_LIMIT = 100;
 const DEFAULT_AGENT = "claude-code";
+// UserPromptSubmit input carries the whole prompt; the fields hooks need are small.
+const MAX_HOOK_INPUT_BYTES = 1024 * 1024;
 
 /** Everything the CLI touches outside itself, so tests can drive it. API settings come from process.env. */
 export interface CliIO {
@@ -73,6 +83,10 @@ Setup:
   agent-memory init --remove-allowlist [--scope user|project]
   agent-memory config
   agent-memory health
+
+Claude Code hooks (always exit 0, read hook JSON on stdin):
+  agent-memory hook session-start          guidance; adds a resume prompt after compaction
+  agent-memory hook turn [--interval N]    opt-in nudge to store learnings every Nth prompt (default 5)
 
 Every command takes --json for machine-readable output and --insecure to allow
 plain http to a non-local host. The API key comes from MEMORY_API_KEY or the
@@ -424,6 +438,35 @@ async function runInit(rest: string[], io: CliIO): Promise<number> {
   return EXIT.ok;
 }
 
+/**
+ * `agent-memory hook <event>` for Claude Code hooks. Always exits 0: exit 2 from a
+ * UserPromptSubmit hook would block the user's prompt, and any other non-zero code shows
+ * them an error. Problems go to stderr, which Claude Code keeps in its debug log.
+ */
+async function runHook(rest: string[], io: CliIO): Promise<number> {
+  try {
+    const a = parseArgs({ "--interval": Number }, rest);
+    const [event] = a._;
+    const input = parseHookInput(await io.readStdin(MAX_HOOK_INPUT_BYTES));
+
+    let output: HookOutput | null;
+    if (event === "session-start") {
+      output = sessionStartOutput(input);
+    } else if (event === "turn") {
+      const interval =
+        positiveInt("--interval", a["--interval"], MAX_LIMIT) ?? DEFAULT_TURN_INTERVAL;
+      output = turnOutput(input, { interval, dir: stateDir() });
+    } else {
+      throw new UsageError(`Unknown hook event: ${event ?? "(none)"}. Use session-start or turn.`);
+    }
+
+    if (output) io.stdout(JSON.stringify(output));
+  } catch (err) {
+    io.stderr(`agent-memory hook: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return EXIT.ok;
+}
+
 /** Run one CLI invocation and return its exit code. Never throws. */
 export async function run(argv: string[], io: CliIO): Promise<number> {
   const [command, ...rest] = argv;
@@ -431,6 +474,8 @@ export async function run(argv: string[], io: CliIO): Promise<number> {
     io.stdout(USAGE);
     return command ? EXIT.ok : EXIT.usage;
   }
+
+  if (command === "hook") return runHook(rest, io);
 
   try {
     if (command === "init") return await runInit(rest, io);
