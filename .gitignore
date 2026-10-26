@@ -2,6 +2,7 @@ node_modules/
 # dist/ ships the prebuilt MCP bundles (npm run bundle); ignore everything else tsc emits there
 dist/*
 !dist/index.js
+!dist/cli.js
 !dist/hooks/
 dist/hooks/*
 !dist/hooks/memory-turn-hook.js

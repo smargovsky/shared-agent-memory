@@ -14,7 +14,25 @@
       "version": "0.2.8",
       "strict": true,
       "category": "mcp",
-      "tags": ["mcp", "memory", "agents", "qdrant"]
+      "tags": [
+        "mcp",
+        "memory",
+        "agents",
+        "qdrant"
+      ]
+    },
+    {
+      "name": "agent-memory-cli",
+      "source": "./plugins/agent-memory-cli",
+      "description": "Shared memory through the agent-memory CLI instead of MCP: skill + SessionStart hook. Needs the CLI on PATH.",
+      "version": "0.3.0",
+      "strict": true,
+      "category": "productivity",
+      "tags": [
+        "memory",
+        "agents",
+        "cli"
+      ]
     }
   ]
 }

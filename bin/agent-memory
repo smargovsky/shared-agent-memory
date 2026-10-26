@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -e
+
+# Resolve symlinks so this works when linked onto PATH (e.g. ~/.local/bin/agent-memory).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+NODE_BIN="${NODE:-$(command -v node 2>/dev/null || find "$HOME/.nvm/versions/node" -path '*/bin/node' -type f 2>/dev/null | sort -V | tail -1)}"
+
+if [ -z "$NODE_BIN" ]; then
+  echo "Node.js is required: set NODE or install Node.js" >&2
+  exit 127
+fi
+
+# dist/cli.js is a prebuilt, self-contained bundle (npm run bundle).
+if [ ! -f "$ROOT/dist/cli.js" ]; then
+  echo "Missing prebuilt bundle: $ROOT/dist/cli.js (run 'npm run bundle')" >&2
+  exit 1
+fi
+
+exec "$NODE_BIN" "$ROOT/dist/cli.js" "$@"

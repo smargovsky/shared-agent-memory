@@ -1,0 +1,13 @@
+{
+  "name": "agent-memory-cli",
+  "description": "Shared team memory for Claude Code without an MCP server: a skill and a SessionStart hook that drive the agent-memory CLI. Requires agent-memory on PATH (see the repo README).",
+  "version": "0.3.0",
+  "author": {
+    "name": "Serge Margovsky",
+    "email": "smargovsky@gmail.com"
+  },
+  "homepage": "https://github.com/smargovsky/shared-agent-memory",
+  "repository": "https://github.com/smargovsky/shared-agent-memory",
+  "license": "MIT",
+  "keywords": ["memory", "agents", "cli", "claude-code"]
+}

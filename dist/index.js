@@ -176,7 +176,6 @@ var require_arg = __commonJS({
 
 // src/index.ts
 var import_arg = __toESM(require_arg(), 1);
-import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -656,8 +655,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path, errorMaps, issueData } = params;
-  const fullPath = [...path, ...issueData.path || []];
+  const { data, path: path2, errorMaps, issueData } = params;
+  const fullPath = [...path2, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -773,11 +772,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path, key) {
+  constructor(parent, value, path2, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path;
+    this._path = path2;
     this._key = key;
   }
   get path() {
@@ -5285,6 +5284,84 @@ var StdioServerTransport = class {
 
 // src/client.ts
 var DEFAULT_API_BASE_URL = "http://localhost:3100";
+var DEFAULT_TIMEOUT_MS = 1e4;
+var RETRY_BASE_DELAY_MS = 200;
+var RETRY_JITTER_MS = 300;
+var NEVER_SENT_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+var MemoryApiError = class extends Error {
+  kind;
+  status;
+  outcomeUnknown;
+  constructor(message, options) {
+    super(message, { cause: options.cause });
+    this.name = "MemoryApiError";
+    this.kind = options.kind;
+    this.status = options.status;
+    this.outcomeUnknown = options.outcomeUnknown ?? false;
+  }
+};
+function getTimeoutMs() {
+  const raw = Number(process.env.MEMORY_API_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function retryDelayMs() {
+  return RETRY_BASE_DELAY_MS + Math.random() * RETRY_JITTER_MS;
+}
+function isTimeoutError(err) {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+async function fetchWithTimeout(url, init, isWrite) {
+  const timeoutMs = getTimeoutMs();
+  const writeNote = isWrite ? "; the write may or may not have been applied, search before retrying" : "";
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new MemoryApiError(
+        `Memory API request timed out after ${timeoutMs}ms${writeNote}`,
+        { kind: "timeout", outcomeUnknown: isWrite, cause: err }
+      );
+    }
+    const code = err?.cause?.code;
+    const reason = (err instanceof Error ? err.message : String(err)) + (typeof code === "string" ? ` (${code})` : "");
+    const neverSent = typeof code === "string" && NEVER_SENT_CODES.has(code);
+    const unknown = isWrite && !neverSent;
+    throw new MemoryApiError(
+      `Memory API unreachable: ${reason}${unknown ? writeNote : ""}`,
+      { kind: "network", outcomeUnknown: unknown, cause: err }
+    );
+  }
+}
+function parseJson(text) {
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+function errorMessageFrom(json, text, res) {
+  if (typeof json === "object" && json !== null) {
+    const error = json.error;
+    if (typeof error === "string") return error;
+    if (typeof error === "object" && error !== null && typeof error.message === "string") {
+      return error.message;
+    }
+  }
+  const snippet = text.trim().slice(0, 200);
+  return snippet && json === void 0 ? snippet : res.statusText;
+}
+function isRetryable(err) {
+  if (!(err instanceof MemoryApiError)) return false;
+  if (err.kind === "timeout" || err.kind === "network") return true;
+  return err.kind === "http" && err.status !== void 0 && err.status >= 500;
+}
 function getApiBaseUrl() {
   return (process.env.MEMORY_API_BASE_URL || process.env.MEMORY_API_URL || process.env.SHARED_MEMORY_API_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, "");
 }
@@ -5303,13 +5380,13 @@ function encodeQuery(params) {
   }
   return qs.toString();
 }
-async function request(method, path, options = {}) {
+async function request(method, path2, options = {}) {
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("MEMORY_API_KEY or SHARED_MEMORY_API_KEY is required");
   }
   const query = options.query ? encodeQuery(options.query) : "";
-  const url = `${getApiBaseUrl()}${path}${query ? `?${query}` : ""}`;
+  const url = `${getApiBaseUrl()}${path2}${query ? `?${query}` : ""}`;
   const headers = {
     Authorization: `Bearer ${apiKey}`
   };
@@ -5317,16 +5394,32 @@ async function request(method, path, options = {}) {
   if (body) {
     headers["Content-Type"] = "application/json";
   }
-  const res = await fetch(url, {
-    method,
-    headers,
-    body
-  });
+  const isWrite = method !== "GET";
+  const attempts = isWrite ? 1 : 2;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await sendOnce(url, { method, headers, body }, isWrite);
+    } catch (err) {
+      if (attempt >= attempts || !isRetryable(err)) throw err;
+      await sleep(retryDelayMs());
+    }
+  }
+}
+async function sendOnce(url, init, isWrite) {
+  const res = await fetchWithTimeout(url, init, isWrite);
   const text = await res.text();
-  const json = text ? JSON.parse(text) : {};
+  const json = parseJson(text);
   if (!res.ok) {
-    const message = typeof json?.error?.message === "string" ? json.error.message : typeof json?.error === "string" ? json.error : res.statusText;
-    throw new Error(`Memory API ${res.status}: ${message}`);
+    throw new MemoryApiError(
+      `Memory API ${res.status}: ${errorMessageFrom(json, text, res)}`,
+      { kind: "http", status: res.status }
+    );
+  }
+  if (json === void 0) {
+    throw new MemoryApiError(
+      `Memory API ${res.status}: response was not JSON`,
+      { kind: "invalid-response", status: res.status }
+    );
   }
   return json;
 }
@@ -5403,6 +5496,63 @@ async function getConfig() {
     collectionName: result.data.collectionName,
     modelReady: result.data.modelReady
   };
+}
+
+// src/format.ts
+function formatAttribution(r) {
+  const creator = r.createdBy;
+  const updater = r.updatedBy;
+  if (creator && updater && creator !== updater) {
+    return `created by ${creator}, updated by ${updater}`;
+  }
+  const who = creator || updater;
+  return who ? `by ${who}` : "";
+}
+function formatMeta(r) {
+  const parts = [
+    `Created: ${r.created_at}${r.createdBy ? ` by ${r.createdBy}` : ""}`
+  ];
+  const updatedAt = r.updatedAt || r.updated_at;
+  const changed = updatedAt && updatedAt !== r.created_at || r.updatedBy && r.updatedBy !== r.createdBy;
+  if (changed) {
+    parts.push(
+      `Updated: ${updatedAt || r.created_at}${r.updatedBy ? ` by ${r.updatedBy}` : ""}`
+    );
+  }
+  return parts.join(" | ");
+}
+function formatSearchResults(results) {
+  if (results.length === 0) return "No memories found.";
+  return results.map((r, i) => {
+    const who = formatAttribution(r);
+    return `[${i + 1}] (score: ${r.score.toFixed(3)}) [${r.project}] ${r.id}
+${r.title || "(untitled)"}${who ? ` \u2014 ${who}` : ""}`;
+  }).join("\n");
+}
+function formatLoadedMemories(results) {
+  if (results.length === 0) return "No memories found for the given IDs.";
+  return results.map(
+    (r, i) => `[${i + 1}] [${r.agent}/${r.project}]
+ID: ${r.id}
+Title: ${r.title || "(untitled)"}
+${r.text}
+Tags: ${Array.isArray(r.tags) ? r.tags.join(", ") : "none"} | ${formatMeta(r)}`
+  ).join("\n\n");
+}
+function formatRecent(results) {
+  if (results.length === 0) return "No recent memories.";
+  return results.map((r, i) => {
+    const who = formatAttribution(r);
+    return `[${i + 1}] [${r.project}] ${r.id} ${r.created_at}
+${r.title || "(untitled)"}${who ? ` \u2014 ${who}` : ""}`;
+  }).join("\n");
+}
+function formatConfig(config, defaults) {
+  return `Memory API: ${config.apiBaseUrl}
+Collection: ${config.collectionName}
+Default Agent: ${defaults.agent}
+Default Project: ${defaults.project}
+Model Ready: ${config.modelReady}`;
 }
 
 // src/ingest/claude-code.ts
@@ -5643,6 +5793,38 @@ function isSearchResult(value) {
   return typeof result.id === "string" && typeof result.score === "number" && typeof result.text === "string" && typeof result.title === "string";
 }
 
+// src/project.ts
+import { execFileSync } from "child_process";
+import path from "path";
+var GIT_TIMEOUT_MS = 5e3;
+function projectFromRemoteUrl(remote) {
+  const match = remote.trim().match(/[/:]([^/]+?)(?:\.git)?\/?$/);
+  return match ? match[1] : null;
+}
+function getProjectFromGitRemote(cwd) {
+  try {
+    const remote = execFileSync("git", ["remote", "get-url", "origin"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: GIT_TIMEOUT_MS
+    });
+    return projectFromRemoteUrl(remote);
+  } catch {
+    return null;
+  }
+}
+function resolveDefaultProject(options = {}) {
+  const env = options.env ?? process.env;
+  const cwd = options.cwd ?? env.PWD ?? process.cwd();
+  const gitLookup = options.gitLookup ?? getProjectFromGitRemote;
+  if (options.flag) return options.flag;
+  if (env.DEFAULT_PROJECT) return env.DEFAULT_PROJECT;
+  const gitProject = gitLookup(cwd);
+  if (gitProject) return gitProject;
+  return path.basename(cwd) || "default";
+}
+
 // src/index.ts
 function ensureArray(val) {
   if (val == null) return void 0;
@@ -5655,28 +5837,6 @@ function ensureArray(val) {
     }
   }
   return void 0;
-}
-function formatAttribution(r) {
-  const creator = r.createdBy;
-  const updater = r.updatedBy;
-  if (creator && updater && creator !== updater) {
-    return `created by ${creator}, updated by ${updater}`;
-  }
-  const who = creator || updater;
-  return who ? `by ${who}` : "";
-}
-function formatMeta(r) {
-  const parts = [
-    `Created: ${r.created_at}${r.createdBy ? ` by ${r.createdBy}` : ""}`
-  ];
-  const updatedAt = r.updatedAt || r.updated_at;
-  const changed = updatedAt && updatedAt !== r.created_at || r.updatedBy && r.updatedBy !== r.createdBy;
-  if (changed) {
-    parts.push(
-      `Updated: ${updatedAt || r.created_at}${r.updatedBy ? ` by ${r.updatedBy}` : ""}`
-    );
-  }
-  return parts.join(" | ");
 }
 var args = (0, import_arg.default)({
   "--api-key": String,
@@ -5710,33 +5870,13 @@ Options:
 `);
   process.exit(0);
 }
-function getProjectFromGitRemote() {
-  try {
-    const remote = execSync("git remote get-url origin", {
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"]
-    }).trim();
-    const match = remote.match(/[/:]([^/]+?)(?:\.git)?$/);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-}
-function getDefaultProject() {
-  if (args["--project"]) return args["--project"];
-  const gitProject = getProjectFromGitRemote();
-  if (gitProject) return gitProject;
-  if (process.env.DEFAULT_PROJECT) return process.env.DEFAULT_PROJECT;
-  const pwd = process.env.PWD || process.cwd();
-  return pwd.split("/").pop() || "default";
-}
 if (args["--agent"]) process.env.DEFAULT_AGENT = args["--agent"];
 if (args["--memory-api-url"])
   process.env.MEMORY_API_URL = args["--memory-api-url"];
 if (args["--memory-api-key"] || args["--api-key"]) {
   process.env.MEMORY_API_KEY = args["--memory-api-key"] || args["--api-key"];
 }
-var defaultProject = getDefaultProject();
+var defaultProject = resolveDefaultProject({ flag: args["--project"] });
 var defaultAgent = args["--agent"] || process.env.DEFAULT_AGENT || "unknown";
 function printIngestSummary(result) {
   console.log(
@@ -5913,16 +6053,11 @@ async function main() {
           project: toolArgs.project,
           tags: ensureArray(toolArgs.tags)
         });
-        const results = result.results;
         return {
           content: [
             {
               type: "text",
-              text: results.length === 0 ? "No memories found." : results.map((r, i) => {
-                const who = formatAttribution(r);
-                return `[${i + 1}] (score: ${r.score.toFixed(3)}) [${r.project}] ${r.id}
-${r.title || "(untitled)"}${who ? ` \u2014 ${who}` : ""}`;
-              }).join("\n")
+              text: formatSearchResults(result.results)
             }
           ]
         };
@@ -5935,18 +6070,11 @@ ${r.title || "(untitled)"}${who ? ` \u2014 ${who}` : ""}`;
           };
         }
         const result = await loadMemories(ids);
-        const results = result.results;
         return {
           content: [
             {
               type: "text",
-              text: results.length === 0 ? "No memories found for the given IDs." : results.map(
-                (r, i) => `[${i + 1}] [${r.agent}/${r.project}]
-ID: ${r.id}
-Title: ${r.title || "(untitled)"}
-${r.text}
-Tags: ${Array.isArray(r.tags) ? r.tags.join(", ") : "none"} | ${formatMeta(r)}`
-              ).join("\n\n")
+              text: formatLoadedMemories(result.results)
             }
           ]
         };
@@ -5956,17 +6084,9 @@ Tags: ${Array.isArray(r.tags) ? r.tags.join(", ") : "none"} | ${formatMeta(r)}`
         const days = toolArgs.days || 30;
         const project = toolArgs.project;
         const result = await listRecent({ limit, days, project });
-        const results = result.results;
         return {
           content: [
-            {
-              type: "text",
-              text: results.length === 0 ? "No recent memories." : results.map((r, i) => {
-                const who = formatAttribution(r);
-                return `[${i + 1}] [${r.project}] ${r.id} ${r.created_at}
-${r.title || "(untitled)"}${who ? ` \u2014 ${who}` : ""}`;
-              }).join("\n")
-            }
+            { type: "text", text: formatRecent(result.results) }
           ]
         };
       }
@@ -5988,11 +6108,10 @@ ${r.title || "(untitled)"}${who ? ` \u2014 ${who}` : ""}`;
           content: [
             {
               type: "text",
-              text: `Memory API: ${config.apiBaseUrl}
-Collection: ${config.collectionName}
-Default Agent: ${defaultAgent}
-Default Project: ${defaultProject}
-Model Ready: ${config.modelReady}`
+              text: formatConfig(config, {
+                agent: defaultAgent,
+                project: defaultProject
+              })
             }
           ]
         };

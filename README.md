@@ -131,6 +131,85 @@ claude mcp add-json shared-memory '{
 
 The MCP server talks to the REST API. It does not start Qdrant and does not run a background daemon.
 
+## CLI (no MCP)
+
+`agent-memory` talks to the same REST API without an MCP server. Agents call it through their shell tool.
+
+```bash
+git clone git@github.com:smargovsky/shared-agent-memory.git
+cd shared-agent-memory
+scripts/setup-cli.sh --api-url https://memory.example.com   # prompts for your API key
+agent-memory config                                          # check it
+```
+
+`scripts/setup-cli.sh` does three things, and re-running it skips what is already done:
+
+1. Links `bin/agent-memory` into `~/.local/bin` (`--bin-dir` to change). It has to be on `PATH`: the plugin hook and the permission rules call the bare `agent-memory` command.
+2. Runs `agent-memory init --allowlist`, which saves the API URL and key and adds the permission rules.
+3. Installs the `agent-memory-cli` Claude Code plugin from this repo's marketplace. The plugin has the `shared-memory` skill (when and how agents use the CLI) and the SessionStart hook. It has no MCP server and no plugin settings; credentials come from `init`.
+
+Pass `--scope project` to put the allowlist and plugin in the repo's `.claude/` instead of `~/.claude`, and `--local` to install the plugin from your checkout while testing. Without the script:
+
+```bash
+ln -s "$(pwd)/bin/agent-memory" ~/.local/bin/agent-memory
+agent-memory init --api-url https://memory.example.com --allowlist
+claude plugin marketplace add smargovsky/shared-agent-memory
+claude plugin install agent-memory-cli@shared-agent-memory
+```
+
+The MCP plugin (`shared-agent-memory`) and the CLI plugin (`agent-memory-cli`) are independent. To switch back to MCP, `claude plugin uninstall agent-memory-cli` and `agent-memory init --remove-allowlist`.
+
+`init` writes `~/.config/shared-agent-memory/config.json` (mode 600; `$XDG_CONFIG_HOME` respected). The API key is read from a hidden prompt or piped stdin, never from a flag, so it stays out of `ps`, shell history, and agent transcripts. `MEMORY_API_URL` / `MEMORY_API_KEY` in the environment take precedence over the file. Run `init --rotate-key` to change the key.
+
+`--allowlist` adds Claude Code permission rules to `~/.claude/settings.json` (`--scope project` for the repo's `.claude/settings.json`) so agents can search, load, list, store, and update without a prompt. `delete` is left out on purpose and still asks. Running it again changes nothing; it backs up the file before writing and refuses to edit settings that are not valid JSON. `init --remove-allowlist` takes the rules back out.
+
+| Command | Does |
+| --- | --- |
+| `agent-memory search <query...> [--limit N] [--project P] [--tags a,b]` | Titles, IDs, projects, scores |
+| `agent-memory load <id...>` | Full text; reinforces retention |
+| `agent-memory recent [--limit N] [--days D] [--project P]` | Recently created memories |
+| `agent-memory store --title T [--tags a,b] [--project P]` | Text on stdin (heredoc) or `--text-file` |
+| `agent-memory update <id> [--title T]` | Replaces the text; text on stdin or `--text-file` |
+| `agent-memory delete <id>` | Deletes a memory |
+| `agent-memory config` / `health` | Show settings / check the API is up |
+
+```bash
+agent-memory store --title "Staging deploy needs VPN" --tags deploy <<'EOF'
+Staging deploys fail with a timeout unless the corporate VPN is connected.
+EOF
+```
+
+Every command takes `--json`. Exit codes: `0` ok, `2` usage, `3` API or config failure, `4` rejected by the secret filter (redact and retry). Memory text is capped at 8 KB (`MEMORY_MAX_TEXT_BYTES`) and titles at 120 characters. Plain `http://` is refused for anything but localhost unless `--insecure` is passed. When a write times out, the CLI says the outcome is unknown; search before storing again.
+
+### Running a shared API for a team
+
+The CLI is built for one memory API shared by everyone's agents:
+
+- **One API key per person.** `API_KEYS` takes any number of entries. Give each teammate their own key with a `name` that identifies them. Every write records that name (`createdBy`/`updatedBy` and the audit collection), which is how you trace a bad memory back to whoever's agent wrote it. A single team key makes that record meaningless.
+- **Scope keys to projects** when needed: `"projects": ["billing-api", "web"]` limits what a key can read and write.
+- **Serve it over https.** The CLI refuses plain `http://` to anything but localhost unless `--insecure` is passed, because the bearer token would cross the network in the clear.
+- **Don't commit keys.** Each person runs `agent-memory init` with their own key. Nothing about credentials belongs in a repo's `.claude/settings.json`.
+- **Writes don't ask for approval** once the allowlist is in place, so the guardrails are in code: the server's secret filter rejects credentials, the CLI caps memory size, the skill tells agents never to store instructions copied from fetched content, and `delete` still prompts.
+- **Last write wins.** `update` replaces the whole text, so two agents updating the same memory at once keep only the second. The skill tells agents to load right before updating.
+
+### CLI hooks
+
+The CLI plugin (`plugins/agent-memory-cli/`) registers one hook. On `SessionStart` it runs `agent-memory hook session-start`, which adds short shared-memory guidance to Claude's context. After compaction (`source: "compact"`) it also adds a prompt to resume a task saved under the `recursive-task-state` tag. Hook output goes through `hookSpecificOutput.additionalContext`; `systemMessage` would only be shown to the user, and `PostCompact` hooks can't add context at all.
+
+A nudge every Nth prompt to review the conversation and store learnings is available but off by default. To turn it on, add this to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "agent-memory hook turn --interval 5", "timeout": 10 }] }
+    ]
+  }
+}
+```
+
+It counts prompts per session in `~/.local/state/agent-memory/turn-state/` (`$XDG_STATE_HOME` respected; counters older than a week are pruned). Hook commands always exit 0, so a problem never blocks a prompt; details go to stderr (Claude Code's debug log).
+
 ## Codex Setup
 
 Codex support ships as a native plugin manifest plus a repo-local marketplace:
@@ -209,10 +288,12 @@ Use a direct Cursor MCP entry only when you need machine-local credentials outsi
 
 MCP `store_memory` stores new memories in the detected current project when `project` is omitted. Agents may pass `project` only when deliberately saving knowledge for a different related repo. The MCP server determines the default project by:
 
-1. **Git remote** (preferred): Extracted from `git remote get-url origin`
+1. **`--project` flag**, if passed
+2. **`DEFAULT_PROJECT`**, if set and not empty
+3. **Git remote**: extracted from `git remote get-url origin`
    - `https://github.com/user/my-app.git` → `my-app`
    - `git@bitbucket.org:team/backend.git` → `backend`
-2. **Folder name** (fallback): Used when not in a git repo
+4. **Folder name** (fallback): used when not in a git repo
 
 Search and recent-listing default to all projects the API key can access. Pass `project` to `search_memory`, `list_recent`, or the REST API endpoints to filter to a single project. Search results include the project name so callers can see where each memory came from.
 
@@ -253,6 +334,7 @@ For consistent memory usage, also add durable instructions to `~/.claude/CLAUDE.
 | `MEMORY_API_KEY`  | Bearer token for MCP clients        | required                |
 | `DEFAULT_AGENT`   | Default agent identifier            | `unknown`               |
 | `DEFAULT_PROJECT` | Override auto-detected project      | git repo name or folder |
+| `MEMORY_API_TIMEOUT_MS` | Per-request timeout for API calls. Reads retry once on timeout, network error, or 5xx; writes never retry | `10000` |
 
 ### CLI Arguments
 

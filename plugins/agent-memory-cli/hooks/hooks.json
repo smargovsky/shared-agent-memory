@@ -1,0 +1,17 @@
+{
+  "description": "Shared-memory guidance at session start, plus a resume prompt after compaction. Needs the agent-memory CLI on PATH.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-memory hook session-start || echo 'Shared memory: the agent-memory CLI is not on PATH, so shared memory is unavailable this session. If the user asks for it, point them to the shared-agent-memory README to install it.'",
+            "timeout": 10,
+            "statusMessage": "Loading shared memory guidance"
+          }
+        ]
+      }
+    ]
+  }
+}
