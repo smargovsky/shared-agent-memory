@@ -209,10 +209,12 @@ Use a direct Cursor MCP entry only when you need machine-local credentials outsi
 
 MCP `store_memory` stores new memories in the detected current project when `project` is omitted. Agents may pass `project` only when deliberately saving knowledge for a different related repo. The MCP server determines the default project by:
 
-1. **Git remote** (preferred): Extracted from `git remote get-url origin`
+1. **`--project` flag**, if passed
+2. **`DEFAULT_PROJECT`**, if set and not empty
+3. **Git remote**: extracted from `git remote get-url origin`
    - `https://github.com/user/my-app.git` → `my-app`
    - `git@bitbucket.org:team/backend.git` → `backend`
-2. **Folder name** (fallback): Used when not in a git repo
+4. **Folder name** (fallback): used when not in a git repo
 
 Search and recent-listing default to all projects the API key can access. Pass `project` to `search_memory`, `list_recent`, or the REST API endpoints to filter to a single project. Search results include the project name so callers can see where each memory came from.
 

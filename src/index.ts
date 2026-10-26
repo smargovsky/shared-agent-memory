@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import arg from "arg";
-import { execSync } from "child_process";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -8,7 +7,14 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import * as client from "./client.js";
+import {
+  formatConfig,
+  formatLoadedMemories,
+  formatRecent,
+  formatSearchResults,
+} from "./format.js";
 import { ingestClaudeCodeTranscript } from "./ingest/index.js";
+import { resolveDefaultProject } from "./project.js";
 import { SearchResult } from "./types.js";
 
 /** Defensively parse a value that should be an array but may arrive as a JSON string. */
@@ -24,34 +30,6 @@ function ensureArray<T>(val: unknown): T[] | undefined {
     }
   }
   return undefined;
-}
-
-/** Compact "by X" / "created by X, updated by Y" attribution, or "" if unknown. */
-function formatAttribution(r: SearchResult): string {
-  const creator = r.createdBy;
-  const updater = r.updatedBy;
-  if (creator && updater && creator !== updater) {
-    return `created by ${creator}, updated by ${updater}`;
-  }
-  const who = creator || updater;
-  return who ? `by ${who}` : "";
-}
-
-/** Created/Updated metadata line for full memory display, including actor names. */
-function formatMeta(r: SearchResult): string {
-  const parts = [
-    `Created: ${r.created_at}${r.createdBy ? ` by ${r.createdBy}` : ""}`,
-  ];
-  const updatedAt = r.updatedAt || r.updated_at;
-  const changed =
-    (updatedAt && updatedAt !== r.created_at) ||
-    (r.updatedBy && r.updatedBy !== r.createdBy);
-  if (changed) {
-    parts.push(
-      `Updated: ${updatedAt || r.created_at}${r.updatedBy ? ` by ${r.updatedBy}` : ""}`,
-    );
-  }
-  return parts.join(" | ");
 }
 
 const args = arg({
@@ -88,28 +66,6 @@ Options:
   process.exit(0);
 }
 
-function getProjectFromGitRemote(): string | null {
-  try {
-    const remote = execSync("git remote get-url origin", {
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    const match = remote.match(/[/:]([^/]+?)(?:\.git)?$/);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-}
-
-function getDefaultProject(): string {
-  if (args["--project"]) return args["--project"];
-  const gitProject = getProjectFromGitRemote();
-  if (gitProject) return gitProject;
-  if (process.env.DEFAULT_PROJECT) return process.env.DEFAULT_PROJECT;
-  const pwd = process.env.PWD || process.cwd();
-  return pwd.split("/").pop() || "default";
-}
-
 if (args["--agent"]) process.env.DEFAULT_AGENT = args["--agent"];
 if (args["--memory-api-url"])
   process.env.MEMORY_API_URL = args["--memory-api-url"];
@@ -117,7 +73,7 @@ if (args["--memory-api-key"] || args["--api-key"]) {
   process.env.MEMORY_API_KEY = args["--memory-api-key"] || args["--api-key"];
 }
 
-const defaultProject = getDefaultProject();
+const defaultProject = resolveDefaultProject({ flag: args["--project"] });
 const defaultAgent = args["--agent"] || process.env.DEFAULT_AGENT || "unknown";
 
 function printIngestSummary(
@@ -318,20 +274,11 @@ async function main(): Promise<void> {
           project: toolArgs.project as string | undefined,
           tags: ensureArray<string>(toolArgs.tags),
         });
-        const results = result.results as SearchResult[];
         return {
           content: [
             {
               type: "text",
-              text:
-                results.length === 0
-                  ? "No memories found."
-                  : results
-                      .map((r, i) => {
-                        const who = formatAttribution(r);
-                        return `[${i + 1}] (score: ${r.score.toFixed(3)}) [${r.project}] ${r.id}\n${r.title || "(untitled)"}${who ? ` — ${who}` : ""}`;
-                      })
-                      .join("\n"),
+              text: formatSearchResults(result.results as SearchResult[]),
             },
           ],
         };
@@ -347,20 +294,11 @@ async function main(): Promise<void> {
           };
         }
         const result = await client.loadMemories(ids);
-        const results = result.results as SearchResult[];
         return {
           content: [
             {
               type: "text",
-              text:
-                results.length === 0
-                  ? "No memories found for the given IDs."
-                  : results
-                      .map(
-                        (r, i) =>
-                          `[${i + 1}] [${r.agent}/${r.project}]\nID: ${r.id}\nTitle: ${r.title || "(untitled)"}\n${r.text}\nTags: ${Array.isArray(r.tags) ? r.tags.join(", ") : "none"} | ${formatMeta(r)}`,
-                      )
-                      .join("\n\n"),
+              text: formatLoadedMemories(result.results as SearchResult[]),
             },
           ],
         };
@@ -371,21 +309,9 @@ async function main(): Promise<void> {
         const days = (toolArgs.days as number) || 30;
         const project = toolArgs.project as string | undefined;
         const result = await client.listRecent({ limit, days, project });
-        const results = result.results as SearchResult[];
         return {
           content: [
-            {
-              type: "text",
-              text:
-                results.length === 0
-                  ? "No recent memories."
-                  : results
-                      .map((r, i) => {
-                        const who = formatAttribution(r);
-                        return `[${i + 1}] [${r.project}] ${r.id} ${r.created_at}\n${r.title || "(untitled)"}${who ? ` — ${who}` : ""}`;
-                      })
-                      .join("\n"),
-            },
+            { type: "text", text: formatRecent(result.results as SearchResult[]) },
           ],
         };
       }
@@ -410,7 +336,10 @@ async function main(): Promise<void> {
           content: [
             {
               type: "text",
-              text: `Memory API: ${config.apiBaseUrl}\nCollection: ${config.collectionName}\nDefault Agent: ${defaultAgent}\nDefault Project: ${defaultProject}\nModel Ready: ${config.modelReady}`,
+              text: formatConfig(config, {
+                agent: defaultAgent,
+                project: defaultProject,
+              }),
             },
           ],
         };
