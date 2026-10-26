@@ -143,6 +143,14 @@ agent-memory init --api-url https://memory.example.com --allowlist   # prompts f
 agent-memory config                                                  # check it
 ```
 
+Agents learn when and how to use the CLI from the `shared-memory` skill in
+`plugins/agent-memory-cli/skills/shared-memory/SKILL.md`. Until the CLI plugin ships, link it in
+by hand:
+
+```bash
+ln -s "$(pwd)/shared-agent-memory/plugins/agent-memory-cli/skills/shared-memory" ~/.claude/skills/shared-memory
+```
+
 `init` writes `~/.config/shared-agent-memory/config.json` (mode 600; `$XDG_CONFIG_HOME` respected). The API key is read from a hidden prompt or piped stdin, never from a flag, so it stays out of `ps`, shell history, and agent transcripts. `MEMORY_API_URL` / `MEMORY_API_KEY` in the environment take precedence over the file. Run `init --rotate-key` to change the key.
 
 `--allowlist` adds Claude Code permission rules to `~/.claude/settings.json` (`--scope project` for the repo's `.claude/settings.json`) so agents can search, load, list, store, and update without a prompt. `delete` is left out on purpose and still asks. Running it again changes nothing; it backs up the file before writing and refuses to edit settings that are not valid JSON. `init --remove-allowlist` takes the rules back out.
