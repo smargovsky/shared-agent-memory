@@ -322,6 +322,25 @@ describe("memory API client failure handling", () => {
     expect((err as Error).message).toContain("fetch failed");
   });
 
+  it("does not mark a refused connection as outcome unknown", async () => {
+    stubFetch(async () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connect ECONNREFUSED"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+    });
+
+    const err = await captureError(
+      storeMemory({ title: "T", text: "body", project: "p" }),
+    );
+
+    expect(err).toMatchObject({ kind: "network", outcomeUnknown: false });
+    expect((err as Error).message).toBe(
+      "Memory API unreachable: fetch failed (ECONNREFUSED)",
+    );
+  });
+
   it("surfaces a short snippet of a non-JSON error page", async () => {
     stubFetch(
       async () =>

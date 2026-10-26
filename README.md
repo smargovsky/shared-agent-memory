@@ -131,6 +131,40 @@ claude mcp add-json shared-memory '{
 
 The MCP server talks to the REST API. It does not start Qdrant and does not run a background daemon.
 
+## CLI (no MCP)
+
+`agent-memory` talks to the same REST API without an MCP server. Agents call it through their shell tool.
+
+```bash
+git clone git@github.com:smargovsky/shared-agent-memory.git
+ln -s "$(pwd)/shared-agent-memory/bin/agent-memory" ~/.local/bin/agent-memory
+
+agent-memory init --api-url https://memory.example.com --allowlist   # prompts for the API key
+agent-memory config                                                  # check it
+```
+
+`init` writes `~/.config/shared-agent-memory/config.json` (mode 600; `$XDG_CONFIG_HOME` respected). The API key is read from a hidden prompt or piped stdin, never from a flag, so it stays out of `ps`, shell history, and agent transcripts. `MEMORY_API_URL` / `MEMORY_API_KEY` in the environment take precedence over the file. Run `init --rotate-key` to change the key.
+
+`--allowlist` adds Claude Code permission rules to `~/.claude/settings.json` (`--scope project` for the repo's `.claude/settings.json`) so agents can search, load, list, store, and update without a prompt. `delete` is left out on purpose and still asks. Running it again changes nothing; it backs up the file before writing and refuses to edit settings that are not valid JSON. `init --remove-allowlist` takes the rules back out.
+
+| Command | Does |
+| --- | --- |
+| `agent-memory search <query...> [--limit N] [--project P] [--tags a,b]` | Titles, IDs, projects, scores |
+| `agent-memory load <id...>` | Full text; reinforces retention |
+| `agent-memory recent [--limit N] [--days D] [--project P]` | Recently created memories |
+| `agent-memory store --title T [--tags a,b] [--project P]` | Text on stdin (heredoc) or `--text-file` |
+| `agent-memory update <id> [--title T]` | Replaces the text; text on stdin or `--text-file` |
+| `agent-memory delete <id>` | Deletes a memory |
+| `agent-memory config` / `health` | Show settings / check the API is up |
+
+```bash
+agent-memory store --title "Staging deploy needs VPN" --tags deploy <<'EOF'
+Staging deploys fail with a timeout unless the corporate VPN is connected.
+EOF
+```
+
+Every command takes `--json`. Exit codes: `0` ok, `2` usage, `3` API or config failure, `4` rejected by the secret filter (redact and retry). Memory text is capped at 8 KB (`MEMORY_MAX_TEXT_BYTES`) and titles at 120 characters. Plain `http://` is refused for anything but localhost unless `--insecure` is passed. When a write times out, the CLI says the outcome is unknown; search before storing again.
+
 ## Codex Setup
 
 Codex support ships as a native plugin manifest plus a repo-local marketplace:

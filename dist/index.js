@@ -5287,6 +5287,7 @@ var DEFAULT_API_BASE_URL = "http://localhost:3100";
 var DEFAULT_TIMEOUT_MS = 1e4;
 var RETRY_BASE_DELAY_MS = 200;
 var RETRY_JITTER_MS = 300;
+var NEVER_SENT_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
 var MemoryApiError = class extends Error {
   kind;
   status;
@@ -5327,10 +5328,13 @@ async function fetchWithTimeout(url, init, isWrite) {
         { kind: "timeout", outcomeUnknown: isWrite, cause: err }
       );
     }
-    const reason = err instanceof Error ? err.message : String(err);
+    const code = err?.cause?.code;
+    const reason = (err instanceof Error ? err.message : String(err)) + (typeof code === "string" ? ` (${code})` : "");
+    const neverSent = typeof code === "string" && NEVER_SENT_CODES.has(code);
+    const unknown = isWrite && !neverSent;
     throw new MemoryApiError(
-      `Memory API unreachable: ${reason}${writeNote}`,
-      { kind: "network", outcomeUnknown: isWrite, cause: err }
+      `Memory API unreachable: ${reason}${unknown ? writeNote : ""}`,
+      { kind: "network", outcomeUnknown: unknown, cause: err }
     );
   }
 }

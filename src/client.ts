@@ -2,6 +2,7 @@ const DEFAULT_API_BASE_URL = "http://localhost:3100";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const RETRY_BASE_DELAY_MS = 200;
 const RETRY_JITTER_MS = 300;
+const NEVER_SENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
 
 export type MemoryApiErrorKind =
   | "http"
@@ -78,10 +79,18 @@ async function fetchWithTimeout(
         { kind: "timeout", outcomeUnknown: isWrite, cause: err },
       );
     }
-    const reason = err instanceof Error ? err.message : String(err);
+    // Node's fetch says only "fetch failed"; the system error code is on the cause.
+    const code = (err as { cause?: { code?: unknown } })?.cause?.code;
+    const reason =
+      (err instanceof Error ? err.message : String(err)) +
+      (typeof code === "string" ? ` (${code})` : "");
+    // These fail before the request is sent, so a write cannot have been applied.
+    const neverSent =
+      typeof code === "string" && NEVER_SENT_CODES.has(code);
+    const unknown = isWrite && !neverSent;
     throw new MemoryApiError(
-      `Memory API unreachable: ${reason}${writeNote}`,
-      { kind: "network", outcomeUnknown: isWrite, cause: err },
+      `Memory API unreachable: ${reason}${unknown ? writeNote : ""}`,
+      { kind: "network", outcomeUnknown: unknown, cause: err },
     );
   }
 }

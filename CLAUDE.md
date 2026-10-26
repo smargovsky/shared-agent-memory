@@ -13,6 +13,7 @@ MCP Wrapper (index.ts) → REST API (api/server.ts) → Qdrant
 - `index.ts` — MCP stdio server + CLI parsing, exposes memory tools to agents
 - `client.ts` — HTTP client for the REST API (timeouts, read retries, `MemoryApiError`)
 - `format.ts` — text rendering of search/load/recent/config results, shared by MCP and CLI
+- `cli.ts` + `cli/` — `agent-memory` CLI: `run.ts` commands and exit codes, `config.ts` config file + URL safety, `allowlist.ts` Claude Code settings merge
 - `project.ts` — default project resolution (flag > `DEFAULT_PROJECT` > git remote > folder)
 - `api/server.ts` — Fastify API server, holds the embedding model and handles all Qdrant operations
 - `storage.ts` — Qdrant client wrapper (hybrid search: dense + BM25 sparse vectors)
