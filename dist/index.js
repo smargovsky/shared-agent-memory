@@ -5285,6 +5285,80 @@ var StdioServerTransport = class {
 
 // src/client.ts
 var DEFAULT_API_BASE_URL = "http://localhost:3100";
+var DEFAULT_TIMEOUT_MS = 1e4;
+var RETRY_BASE_DELAY_MS = 200;
+var RETRY_JITTER_MS = 300;
+var MemoryApiError = class extends Error {
+  kind;
+  status;
+  outcomeUnknown;
+  constructor(message, options) {
+    super(message, { cause: options.cause });
+    this.name = "MemoryApiError";
+    this.kind = options.kind;
+    this.status = options.status;
+    this.outcomeUnknown = options.outcomeUnknown ?? false;
+  }
+};
+function getTimeoutMs() {
+  const raw = Number(process.env.MEMORY_API_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function retryDelayMs() {
+  return RETRY_BASE_DELAY_MS + Math.random() * RETRY_JITTER_MS;
+}
+function isTimeoutError(err) {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+async function fetchWithTimeout(url, init, isWrite) {
+  const timeoutMs = getTimeoutMs();
+  const writeNote = isWrite ? "; the write may or may not have been applied, search before retrying" : "";
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new MemoryApiError(
+        `Memory API request timed out after ${timeoutMs}ms${writeNote}`,
+        { kind: "timeout", outcomeUnknown: isWrite, cause: err }
+      );
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new MemoryApiError(
+      `Memory API unreachable: ${reason}${writeNote}`,
+      { kind: "network", outcomeUnknown: isWrite, cause: err }
+    );
+  }
+}
+function parseJson(text) {
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+function errorMessageFrom(json, text, res) {
+  if (typeof json === "object" && json !== null) {
+    const error = json.error;
+    if (typeof error === "string") return error;
+    if (typeof error === "object" && error !== null && typeof error.message === "string") {
+      return error.message;
+    }
+  }
+  const snippet = text.trim().slice(0, 200);
+  return snippet && json === void 0 ? snippet : res.statusText;
+}
+function isRetryable(err) {
+  if (!(err instanceof MemoryApiError)) return false;
+  if (err.kind === "timeout" || err.kind === "network") return true;
+  return err.kind === "http" && err.status !== void 0 && err.status >= 500;
+}
 function getApiBaseUrl() {
   return (process.env.MEMORY_API_BASE_URL || process.env.MEMORY_API_URL || process.env.SHARED_MEMORY_API_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, "");
 }
@@ -5317,16 +5391,32 @@ async function request(method, path, options = {}) {
   if (body) {
     headers["Content-Type"] = "application/json";
   }
-  const res = await fetch(url, {
-    method,
-    headers,
-    body
-  });
+  const isWrite = method !== "GET";
+  const attempts = isWrite ? 1 : 2;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await sendOnce(url, { method, headers, body }, isWrite);
+    } catch (err) {
+      if (attempt >= attempts || !isRetryable(err)) throw err;
+      await sleep(retryDelayMs());
+    }
+  }
+}
+async function sendOnce(url, init, isWrite) {
+  const res = await fetchWithTimeout(url, init, isWrite);
   const text = await res.text();
-  const json = text ? JSON.parse(text) : {};
+  const json = parseJson(text);
   if (!res.ok) {
-    const message = typeof json?.error?.message === "string" ? json.error.message : typeof json?.error === "string" ? json.error : res.statusText;
-    throw new Error(`Memory API ${res.status}: ${message}`);
+    throw new MemoryApiError(
+      `Memory API ${res.status}: ${errorMessageFrom(json, text, res)}`,
+      { kind: "http", status: res.status }
+    );
+  }
+  if (json === void 0) {
+    throw new MemoryApiError(
+      `Memory API ${res.status}: response was not JSON`,
+      { kind: "invalid-response", status: res.status }
+    );
   }
   return json;
 }

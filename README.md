@@ -253,6 +253,7 @@ For consistent memory usage, also add durable instructions to `~/.claude/CLAUDE.
 | `MEMORY_API_KEY`  | Bearer token for MCP clients        | required                |
 | `DEFAULT_AGENT`   | Default agent identifier            | `unknown`               |
 | `DEFAULT_PROJECT` | Override auto-detected project      | git repo name or folder |
+| `MEMORY_API_TIMEOUT_MS` | Per-request timeout for API calls. Reads retry once on timeout, network error, or 5xx; writes never retry | `10000` |
 
 ### CLI Arguments
 
