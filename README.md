@@ -137,19 +137,27 @@ The MCP server talks to the REST API. It does not start Qdrant and does not run 
 
 ```bash
 git clone git@github.com:smargovsky/shared-agent-memory.git
-ln -s "$(pwd)/shared-agent-memory/bin/agent-memory" ~/.local/bin/agent-memory
-
-agent-memory init --api-url https://memory.example.com --allowlist   # prompts for the API key
-agent-memory config                                                  # check it
+cd shared-agent-memory
+scripts/setup-cli.sh --api-url https://memory.example.com   # prompts for your API key
+agent-memory config                                          # check it
 ```
 
-Agents learn when and how to use the CLI from the `shared-memory` skill in
-`plugins/agent-memory-cli/skills/shared-memory/SKILL.md`. Until the CLI plugin ships, link it in
-by hand:
+`scripts/setup-cli.sh` does three things, and re-running it skips what is already done:
+
+1. Links `bin/agent-memory` into `~/.local/bin` (`--bin-dir` to change). It has to be on `PATH`: the plugin hook and the permission rules call the bare `agent-memory` command.
+2. Runs `agent-memory init --allowlist`, which saves the API URL and key and adds the permission rules.
+3. Installs the `agent-memory-cli` Claude Code plugin from this repo's marketplace. The plugin has the `shared-memory` skill (when and how agents use the CLI) and the SessionStart hook. It has no MCP server and no plugin settings; credentials come from `init`.
+
+Pass `--scope project` to put the allowlist and plugin in the repo's `.claude/` instead of `~/.claude`, and `--local` to install the plugin from your checkout while testing. Without the script:
 
 ```bash
-ln -s "$(pwd)/shared-agent-memory/plugins/agent-memory-cli/skills/shared-memory" ~/.claude/skills/shared-memory
+ln -s "$(pwd)/bin/agent-memory" ~/.local/bin/agent-memory
+agent-memory init --api-url https://memory.example.com --allowlist
+claude plugin marketplace add smargovsky/shared-agent-memory
+claude plugin install agent-memory-cli@shared-agent-memory
 ```
+
+The MCP plugin (`shared-agent-memory`) and the CLI plugin (`agent-memory-cli`) are independent. To switch back to MCP, `claude plugin uninstall agent-memory-cli` and `agent-memory init --remove-allowlist`.
 
 `init` writes `~/.config/shared-agent-memory/config.json` (mode 600; `$XDG_CONFIG_HOME` respected). The API key is read from a hidden prompt or piped stdin, never from a flag, so it stays out of `ps`, shell history, and agent transcripts. `MEMORY_API_URL` / `MEMORY_API_KEY` in the environment take precedence over the file. Run `init --rotate-key` to change the key.
 
@@ -172,6 +180,17 @@ EOF
 ```
 
 Every command takes `--json`. Exit codes: `0` ok, `2` usage, `3` API or config failure, `4` rejected by the secret filter (redact and retry). Memory text is capped at 8 KB (`MEMORY_MAX_TEXT_BYTES`) and titles at 120 characters. Plain `http://` is refused for anything but localhost unless `--insecure` is passed. When a write times out, the CLI says the outcome is unknown; search before storing again.
+
+### Running a shared API for a team
+
+The CLI is built for one memory API shared by everyone's agents:
+
+- **One API key per person.** `API_KEYS` takes any number of entries. Give each teammate their own key with a `name` that identifies them. Every write records that name (`createdBy`/`updatedBy` and the audit collection), which is how you trace a bad memory back to whoever's agent wrote it. A single team key makes that record meaningless.
+- **Scope keys to projects** when needed: `"projects": ["billing-api", "web"]` limits what a key can read and write.
+- **Serve it over https.** The CLI refuses plain `http://` to anything but localhost unless `--insecure` is passed, because the bearer token would cross the network in the clear.
+- **Don't commit keys.** Each person runs `agent-memory init` with their own key. Nothing about credentials belongs in a repo's `.claude/settings.json`.
+- **Writes don't ask for approval** once the allowlist is in place, so the guardrails are in code: the server's secret filter rejects credentials, the CLI caps memory size, the skill tells agents never to store instructions copied from fetched content, and `delete` still prompts.
+- **Last write wins.** `update` replaces the whole text, so two agents updating the same memory at once keep only the second. The skill tells agents to load right before updating.
 
 ### CLI hooks
 
